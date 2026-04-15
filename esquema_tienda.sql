@@ -128,3 +128,91 @@ CREATE TABLE ventas (
     ON UPDATE CASCADE
     ON DELETE RESTRICT
 ) ENGINE=InnoDB;
+
+-- Procedimiento para registrar una venta y descontar inventario
+-- en una sola transacción.
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS sp_registrar_venta $$
+CREATE PROCEDURE sp_registrar_venta (
+  IN p_id_sucursal BIGINT UNSIGNED,
+  IN p_id_usuario BIGINT UNSIGNED,
+  IN p_id_producto BIGINT UNSIGNED,
+  IN p_cantidad INT,
+  IN p_precio_unitario DECIMAL(12,2),
+  IN p_metodo_pago VARCHAR(20)
+)
+BEGIN
+  DECLARE v_existencia_actual INT;
+  DECLARE v_total DECIMAL(12,2);
+
+  IF p_cantidad IS NULL OR p_cantidad <= 0 THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'La cantidad debe ser mayor a cero.';
+  END IF;
+
+  IF p_precio_unitario IS NULL OR p_precio_unitario < 0 THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'El precio unitario no puede ser negativo.';
+  END IF;
+
+  IF p_metodo_pago NOT IN ('EFECTIVO','TARJETA','TRANSFERENCIA','OTRO') THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Metodo de pago no valido.';
+  END IF;
+
+  SET v_total = p_cantidad * p_precio_unitario;
+
+  START TRANSACTION;
+
+  SELECT existencia
+    INTO v_existencia_actual
+  FROM inventarios
+  WHERE id_sucursal = p_id_sucursal
+    AND id_producto = p_id_producto
+  FOR UPDATE;
+
+  IF v_existencia_actual IS NULL THEN
+    ROLLBACK;
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'No existe inventario para la sucursal y producto indicados.';
+  END IF;
+
+  IF v_existencia_actual < p_cantidad THEN
+    ROLLBACK;
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Inventario insuficiente para completar la venta.';
+  END IF;
+
+  INSERT INTO ventas (
+    id_sucursal,
+    id_usuario,
+    id_producto,
+    cantidad,
+    precio_unitario,
+    total,
+    metodo_pago
+  )
+  VALUES (
+    p_id_sucursal,
+    p_id_usuario,
+    p_id_producto,
+    p_cantidad,
+    p_precio_unitario,
+    v_total,
+    p_metodo_pago
+  );
+
+  UPDATE inventarios
+  SET existencia = existencia - p_cantidad
+  WHERE id_sucursal = p_id_sucursal
+    AND id_producto = p_id_producto;
+
+  COMMIT;
+
+  SELECT
+    LAST_INSERT_ID() AS id_venta,
+    v_total AS total_venta;
+END $$
+
+DELIMITER ;
